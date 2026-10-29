@@ -104,6 +104,18 @@ svg text { font-family: var(--f-num); font-size: 11px; fill: var(--muted); }
 .coach .t { font-family: var(--f-label); font-weight: 600; text-transform: uppercase; font-size: 0.74rem; letter-spacing: 0.05em; color: var(--muted); padding-top: 2px; }
 @media (max-width: 520px) { .coach li { grid-template-columns: minmax(0, 1fr); gap: 2px; } }
 
+/* Cartel de riesgo y griegas */
+.riesgo { display: grid; gap: 2px; padding: 10px 12px; border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--line); }
+.riesgo .k { font-family: var(--f-label); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.riesgo .v { font-family: var(--f-num); font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.riesgo .s { font-size: 0.8rem; color: var(--muted); }
+.greeks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+@media (max-width: 520px) { .greeks { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.greeks .g { background: var(--surface); padding: 8px 10px; display: grid; gap: 1px; }
+.greeks .k { font-family: var(--f-label); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.greeks .v { font-family: var(--f-num); font-size: 1.3rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.greeks .s { font-size: 0.72rem; color: var(--muted); }
+
 .scen td.pct { color: var(--muted); }
 .scen tr.now td { background: var(--accent-soft); font-weight: 600; }
 .cellg { background: var(--gain-bg); color: var(--gain); } .celll { background: var(--loss-bg); color: var(--loss); }
@@ -177,6 +189,8 @@ details > summary { cursor: pointer; font-weight: 600; }
       </section>
       <section class="panel">
         <h2>Qué mirar ahora</h2>
+        <div class="riesgo" id="riesgo" role="status" hidden></div>
+        <div class="greeks" id="greeks" hidden></div>
         <ul class="coach" id="coach"></ul>
       </section>
     </div>
@@ -328,12 +342,20 @@ function griegas() {
 }
 
 // ---------- Partida ----------
-function bases(S0) {
+function pasoBases(S0) {
   const crudo = S0 * 0.035, e = Math.pow(10, Math.floor(Math.log10(crudo)));
-  const paso = [1, 2, 2.5, 5, 10].map(m => m * e).reduce((a, b) => Math.abs(b - crudo) < Math.abs(a - crudo) ? b : a);
-  const out = [];
-  for (let k = Math.ceil(S0 * 0.62 / paso) * paso; k <= S0 * 1.45; k += paso) out.push(Math.round(k * 100) / 100);
+  return [1, 2, 2.5, 5, 10].map(m => m * e).reduce((a, b) => Math.abs(b - crudo) < Math.abs(a - crudo) ? b : a);
+}
+function bases(S0, S = S0) {
+  const paso = pasoBases(S0), out = [];
+  for (let k = Math.ceil(Math.min(S0, S) * 0.62 / paso) * paso; k <= Math.max(S0, S) * 1.45; k += paso) out.push(Math.round(k * 100) / 100);
   return out;
+}
+// Como en el mercado: si GGAL se aleja, se listan bases nuevas para que siempre haya ~40% de cadena a cada lado.
+function ampliarBases() {
+  if (g.fin) return;
+  const nuevas = bases(g.p.S0, g.S).filter(K => !g.bases.includes(K));
+  if (nuevas.length) g.bases = [...g.bases, ...nuevas].sort((a, b) => a - b);
 }
 
 function caminoHistorico(n) {
@@ -482,7 +504,7 @@ let pendientes = leerLS(CLAVE_COLA, []), ahorro = !!leerLS(CLAVE_AHORRO, false),
 let db = null, historial = [];
 async function iniciarDb() {
   $("#cAhorro").checked = ahorro;
-  $("#cAhorro").onchange = e => { ahorro = e.target.checked; escribirLS(CLAVE_AHORRO, ahorro); renderSync(); if (!ahorro) subirPendientes(); };
+  $("#cAhorro").onchange = e => { ahorro = e.target.checked; escribirLS(CLAVE_AHORRO, ahorro); renderSync(); if (!ahorro) { subirPendientes(); guardarEnCurso(); } };
   $("#bsync").onclick = () => subirPendientes(true);
   window.addEventListener("online", () => { if (!ahorro) subirPendientes(); });
   $("#bexpCopy").onclick = exportarCopia;
@@ -493,7 +515,7 @@ async function iniciarDb() {
   $("#lAhorro").hidden = !db; $("#impBox").hidden = !db;
   renderSync();
   if (!db) { renderHistorial(); return; }
-  if (ahorro) renderHistorial(); else { await cargarHistorial(); subirPendientes(); }
+  if (ahorro) renderHistorial(); else { await cargarHistorial(); subirPendientes(); guardarEnCurso(); }
 }
 async function cargarHistorial() {
   try {
@@ -524,6 +546,23 @@ async function guardarPartida(x, estado) {
     aviso(ok ? "Sin conexión con el historial: la partida quedó en este dispositivo y se sube después." : `No se pudo guardar la partida (${e?.code || "error"}). Usá Copiar partida.`);
   }
 }
+// Foto de la partida en curso (en_curso/actual): Claude la lee cuando le preguntás a mitad de partida.
+// Se pisa tras cada operación, deshacer o rueda; con ahorro de datos no se sube.
+let timerEnCurso = null;
+function programarEnCurso() { clearTimeout(timerEnCurso); timerEnCurso = setTimeout(guardarEnCurso, 800); }
+async function guardarEnCurso() {
+  if (!db || ahorro || !g) return;
+  const q = (t, K) => { const c = cotizacion(t, K); return { bid: r2(c.bid), ask: r2(c.ask), mid: r2(c.mid) }; };
+  const doc = {
+    ...registro(g, g.fin ? "terminada" : "en curso"), guardado: new Date().toISOString(),
+    rueda: g.dia, ruedas: g.p.ruedas, S: r2(g.S), cash: Math.round(g.cash), griegas: foto(),
+    posicion: Object.values(g.pos).map(p => ({ tipo: p.tipo, K: p.K, q: p.q, prom: p.prom, mult: mult(p.tipo), ...(g.fin ? {} : q(p.tipo, p.K)) })),
+    cadena: g.fin ? [] : g.bases.map(K => ({ K, iv: r2(100 * ivK(K, g.S)), call: q("C", K), put: q("P", K) })),
+    ultimasOps: g.ops.slice(-8).map(o => `R${o.dia}: ${o.txt}`),
+  };
+  try { await db.collection("en_curso").doc("actual").set(doc); } catch (e) { /* es solo una ayuda para consultar: si falla, la próxima acción la reintenta */ }
+}
+
 async function subirPendientes(manual) {
   if (subiendo || !pendientes.length) return;
   if (!db) { if (manual) aviso("Para subir las partidas abrí el simulador desde claude.ai."); return; }
@@ -646,6 +685,7 @@ function renderStatus() {
 }
 
 function renderChain() {
+  ampliarBases();
   const atm = g.bases.reduce((a, b) => Math.abs(b - g.S) < Math.abs(a - g.S) ? b : a);
   const fila = K => {
     const c = cotizacion("C", K), p = cotizacion("P", K);
@@ -744,6 +784,24 @@ function renderCoach() {
     items.push(["info", "Cerrar hoy", `Cerrando todo a precio de mercado te queda ${fmtS(liq)}. Contra el teórico (${fmtS(res)}), el spread y la comisión te costarían ${fmt(res - liq, 0)}.`]);
   }
   $("#coach").innerHTML = items.map(([c, t, x]) => `<li class="${c}"><span class="t">${t}</span><span>${x}</span></li>`).join("");
+  renderRiesgo(!g.fin && !vacio);
+}
+
+// Monto en riesgo: lo que perdés desde el teórico de hoy si GGAL termina en el peor punto entre -30% y +30% al vencimiento.
+function renderRiesgo(mostrar) {
+  $("#riesgo").hidden = $("#greeks").hidden = !mostrar;
+  if (!mostrar) return;
+  const gr = griegas(), r = rangos(), S = g.S, hoy = teorico(S);
+  const ilimitado = r.ys.at(-1) < 0 && r.ys.at(-1) < r.ys.at(-2) - 1;
+  const enRiesgo = Math.max(0, hoy - r.peor);
+  $("#riesgo").innerHTML = `<span class="k">En riesgo ahora</span><span class="v">${fmt(enRiesgo, 0)}${ilimitado ? ` <span class="loss" style="font-size:0.9rem;font-family:var(--f-label);letter-spacing:0.05em">DESCUBIERTO</span>` : ""}</span>
+    <span class="s">${enRiesgo < 1 ? "Ganás en todo el rango al vencimiento: no hay pérdida desde hoy." : `Lo que perdés desde hoy si GGAL termina en ${fmt(r.dondePeor, 0)} (${pct(r.dondePeor / S - 1)}) al vencimiento.`}${ilimitado ? " Quedaste descubierto al alza: si sube más de 30%, la pérdida sigue creciendo sin límite." : ""}</span>`;
+  $("#greeks").innerHTML = [
+    ["Delta", `${fmtS(gr.delta)} acc.`, ""],
+    ["Gamma", `${fmtS(gr.gamma1)} acc.`, ""],
+    ["Theta", `${fmtS(gr.theta)}`, cls(gr.theta)],
+    ["Vega", `${fmtS(gr.vega)}`, cls(gr.vega)],
+  ].map(([k, v, c]) => `<div class="g"><span class="k">${k}</span><span class="v ${c}">${v}</span></div>`).join("");
 }
 
 function renderPos() {
@@ -814,7 +872,7 @@ function leerCfg() {
   p.modo = $("#cModo").value; p.ej = $("#cEj").checked;
   return p;
 }
-function guardar() { try { localStorage.setItem(CLAVE, JSON.stringify(g)); } catch (e) { /* sin almacenamiento: la partida vive solo en esta pestaña */ } }
+function guardar() { try { localStorage.setItem(CLAVE, JSON.stringify(g)); } catch (e) { /* sin almacenamiento: la partida vive solo en esta pestaña */ } programarEnCurso(); }
 function cargar() { try { const s = JSON.parse(localStorage.getItem(CLAVE)); return s && s.p && s.p.sk != null && s.camino && s.trades && s.diario ? s : null; } catch (e) { return null; } }
 
 document.addEventListener("click", e => {
