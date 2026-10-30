@@ -794,7 +794,9 @@ function renderRiesgo(mostrar) {
   const gr = griegas(), r = rangos(), S = g.S, hoy = teorico(S);
   const ilimitado = r.ys.at(-1) < 0 && r.ys.at(-1) < r.ys.at(-2) - 1;
   const enRiesgo = Math.max(0, hoy - r.peor);
-  $("#riesgo").innerHTML = `<span class="k">En riesgo ahora</span><span class="v">${fmt(enRiesgo, 0)}${ilimitado ? ` <span class="loss" style="font-size:0.9rem;font-family:var(--f-label);letter-spacing:0.05em">DESCUBIERTO</span>` : ""}</span>
+  // Como el Tracker: resultado sobre lo que está en riesgo.
+  const sobreRiesgo = enRiesgo >= 1 ? `<span class="${cls(hoy)}" style="font-size:1rem;margin-left:10px">${fmtS(hoy)} · ${fmtS(100 * hoy / enRiesgo, 1)}%</span>` : "";
+  $("#riesgo").innerHTML = `<span class="k">En riesgo ahora · resultado sobre el riesgo</span><span class="v">${fmt(enRiesgo, 0)}${ilimitado ? ` <span class="loss" style="font-size:0.9rem;font-family:var(--f-label);letter-spacing:0.05em">DESCUBIERTO</span>` : ""}${sobreRiesgo}</span>
     <span class="s">${enRiesgo < 1 ? "Ganás en todo el rango al vencimiento: no hay pérdida desde hoy." : `Lo que perdés desde hoy si GGAL termina en ${fmt(r.dondePeor, 0)} (${pct(r.dondePeor / S - 1)}) al vencimiento.`}${ilimitado ? " Quedaste descubierto al alza: si sube más de 30%, la pérdida sigue creciendo sin límite." : ""}</span>`;
   $("#greeks").innerHTML = [
     ["Delta", `${fmtS(gr.delta)} acc.`, ""],
