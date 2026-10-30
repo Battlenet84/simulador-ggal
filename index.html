@@ -242,6 +242,7 @@ details > summary { cursor: pointer; font-weight: 600; }
       <summary>Nueva partida y parámetros</summary>
       <div style="display:grid; gap:12px; margin-top:12px">
         <div class="config">
+          <label>Capital de la cuenta en $ (0 = sin límite)<input id="cCap" type="number" min="0" step="50000"></label>
           <label>Precio inicial de GGAL<input id="cS0" type="number" step="1"></label>
           <label>Ruedas hasta el vencimiento<input id="cRuedas" type="number" min="5" max="120" step="1"></label>
           <label>Tasa anual (caución)<input id="cR" type="number" step="0.01"></label>
@@ -256,7 +257,7 @@ details > summary { cursor: pointer; font-weight: 600; }
           <label class="check"><input id="cEj" type="checkbox">Empezar con el condor de ejemplo</label>
         </div>
         <div class="controls"><button class="primary" id="bnew">Empezar nueva partida</button></div>
-        <p class="note">Precios teóricos con Black-Scholes. La VI depende del precio: sube cuando GGAL cae (reacción) y tiene forma de sonrisa, más alta en las bases lejanas, sobre todo abajo. Los valores por defecto salen de la cadena real del 28/10/2026. En modo tramo real, el camino son los movimientos diarios de GGAL en pesos de un período elegido al azar; las fechas se revelan al vencimiento. Ese camino incluye devaluaciones y la inflación de cada época, así que puede subir más que la tasa. Simulador de práctica, no es una recomendación de inversión.</p>
+        <p class="note">Precios teóricos con Black-Scholes. La VI depende del precio: sube cuando GGAL cae (reacción) y tiene forma de sonrisa, más alta en las bases lejanas, sobre todo abajo. Los valores por defecto salen de la cadena real del 28/10/2026. En modo tramo real, el camino son los movimientos diarios de GGAL en pesos de un período elegido al azar; las fechas se revelan al vencimiento. Ese camino incluye devaluaciones y la inflación de cada época, así que puede subir más que la tasa. Con capital, las compras se pagan con la caja y las posiciones vendidas inmovilizan garantía: lo peor que darían al vencimiento si GGAL termina entre -50% y +50% del precio del día (un spread inmoviliza su ancho; un lanzamiento descubierto, la pérdida en el extremo). No se puede operar si el disponible queda negativo, salvo para achicar o cubrir. Simulador de práctica, no es una recomendación de inversión.</p>
       </div>
     </details>
   </section>
@@ -268,7 +269,7 @@ const LOTE = 100;
 const mult = tipo => tipo === "S" ? 1 : LOTE; // las opciones van por lote de 100, las acciones de a una
 // Calibrado con la cadena real del 28/10/2026 (vto. 18/12, 51 días): VI al dinero 44,5%, tasa implícita por paridad ~23,5%,
 // VI de las bases 20% abajo ~4 puntos más alta y 20% arriba casi igual (sonrisa más empinada del lado de los puts).
-const DEF = { S0: 5645, ruedas: 35, r: 0.235, iv0: 0.445, sk: 0.042, sm: 0.0, react: 0.4, spread: 0.08, comm: 0.005, modo: "historico", rv: 0.45, ej: false };
+const DEF = { S0: 5645, ruedas: 35, r: 0.235, iv0: 0.445, sk: 0.042, sm: 0.0, react: 0.4, spread: 0.08, comm: 0.005, modo: "historico", rv: 0.45, ej: false, capital: 1000000 };
 const CLAVE = "practica-opciones-ggal-v5";
 const $ = s => document.querySelector(s);
 const nf = d => new Intl.NumberFormat("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -334,6 +335,23 @@ function liquidar() {
   return v - comm;
 }
 
+// ---------- Capital y garantía ----------
+// Garantía: lo peor que da la posición al vencimiento (sin la caja) si GGAL termina entre -50% y +50% de hoy.
+// Los spreads y las coberturas se compensan solos; un lanzamiento descubierto inmoviliza la pérdida en el extremo.
+// Disponible = capital + caja - garantía: las compras salen de la caja y lo vendido en corto bloquea garantía.
+const ESTRES = 0.5;
+function garantia(pos = g.pos, S = g.S) {
+  const ps = Object.values(pos);
+  if (!ps.length) return 0;
+  const lo = S * (1 - ESTRES), hi = S * (1 + ESTRES);
+  const pago = x => ps.reduce((s, p) => s + p.q * mult(p.tipo) * (p.tipo === "S" ? x : intrinseco(p.tipo, x, p.K)), 0);
+  // El pago es lineal por tramos: el mínimo está en un extremo o en una base
+  const xs = [lo, hi, ...ps.filter(p => p.tipo !== "S" && p.K > lo && p.K < hi).map(p => p.K)];
+  return Math.max(0, -Math.min(...xs.map(pago)));
+}
+const conLimite = () => (g.p.capital || 0) > 0;
+const disponible = (cash = g.cash, pos = g.pos) => (g.p.capital || 0) + cash - garantia(pos);
+
 function griegas() {
   const S = g.S, h = S * 0.005, f0 = teorico(S), fu = teorico(S + h), fd = teorico(S - h);
   const delta = (fu - fd) / (2 * h);
@@ -390,10 +408,27 @@ function nueva(p) {
 
 function nombre(tipo, K) { return tipo === "S" ? "Acciones GGAL" : (tipo === "C" ? "Call " : "Put ") + fmt(K, K % 1 ? 2 : 0); }
 
-function operar(tipo, K, lado, lotes, silencioso = false) {
+// Disponible que queda si se ejecuta la orden (sin tocar la partida)
+function disponibleTras(tipo, K, lado, lotes, px) {
+  const clave = tipo + (tipo === "S" ? "" : K), pos = { ...g.pos }, q = (pos[clave]?.q || 0) + lado * lotes;
+  if (q === 0) delete pos[clave]; else pos[clave] = { tipo, K, q };
+  return disponible(g.cash - lado * px * mult(tipo) * lotes - g.p.comm * px * mult(tipo) * lotes, pos);
+}
+
+function operar(tipo, K, lado, lotes, silencioso = false, sinControl = false) {
   if (g.fin) return aviso("La partida terminó. Empezá una nueva abajo.");
   const c = cotizacion(tipo, K), px = lado > 0 ? c.ask : c.bid;
   if (px <= 0) return aviso("Nadie compra esa base: no hay precio de venta.");
+  if (conLimite() && !sinControl) {
+    // Se rechaza si deja el disponible negativo, salvo que lo mejore (cubrirse o achicar cuando falta garantía)
+    const antes = disponible(), entra = n => { const d = disponibleTras(tipo, K, lado, n, px); return d >= 0 || d >= antes; };
+    if (!entra(lotes)) {
+      let a = 0, b = lotes - 1; // máximo que entra (búsqueda binaria)
+      while (a < b) { const m = Math.ceil((a + b) / 2); if (entra(m)) a = m; else b = m - 1; }
+      const u = tipo === "S" ? "acciones" : "lotes";
+      return aviso(`No te alcanza: con esa orden el disponible quedaría en ${fmt(disponibleTras(tipo, K, lado, lotes, px), 0)} (capital ${fmt(g.p.capital, 0)}, garantía ${fmt(garantia(), 0)} hoy). ${a ? `Como mucho podés operar ${a} ${u}.` : "No entra ni uno."}`);
+    }
+  }
   if (!silencioso) guardarDeshacer();
   const clave = tipo + (tipo === "S" ? "" : K);
   const antes = { delta: griegas().delta, teo: teorico(g.S) };
@@ -427,7 +462,9 @@ function avanzar(n) {
   if (g.fin) guardarPartida(g, "terminada");
   guardar(); render();
   const prev = g.camino.at(-2), mov = g.S / prev - 1;
-  aviso(g.fin ? "Vencimiento: las opciones se liquidaron a su valor intrínseco." : `Rueda ${g.dia}: GGAL ${pct(mov)} a ${fmt(g.S)}.`);
+  const falta = !g.fin && conLimite() ? -disponible() : 0;
+  aviso(g.fin ? "Vencimiento: las opciones se liquidaron a su valor intrínseco." : `Rueda ${g.dia}: GGAL ${pct(mov)} a ${fmt(g.S)}.` +
+    (falta > 0 ? ` Te falta garantía por ${fmt(falta, 0)}: solo podés achicar o cubrir la posición.` : ""));
 }
 
 function vencer() {
@@ -444,7 +481,7 @@ function cerrarTodo() {
   for (const p of Object.values({ ...g.pos })) {
     const c = cotizacion(p.tipo, p.K);
     if (p.q > 0 && c.bid <= 0) { delete g.pos[p.tipo + (p.tipo === "S" ? "" : p.K)]; g.ops.push({ dia: g.dia, txt: `${nombre(p.tipo, p.K)} sin comprador: se abandona (vale 0).` }); continue; }
-    operar(p.tipo, p.K, p.q > 0 ? -1 : +1, Math.abs(p.q), true);
+    operar(p.tipo, p.K, p.q > 0 ? -1 : +1, Math.abs(p.q), true, true);
   }
   g.pnl[g.pnl.length - 1] = teorico(g.S); guardar(); render(); aviso("Cerraste toda la posición a precios de mercado.");
 }
@@ -487,7 +524,7 @@ function textoPartida(x) {
     `PARTIDA ${reg.id} (${reg.estado}) · ${p.modo === "historico" ? "tramo real " + (reg.tramo || "") : "camino aleatorio, vol " + fmt(100 * p.rv, 0) + "%"}`,
     `GGAL ${fmt(p.S0)} → ${fmt(x.S)} (${pct(x.S / p.S0 - 1)}) · rueda ${x.dia}/${p.ruedas} · VI ${fmt(100 * p.iv0, 1)}% (+${fmt(100 * p.sk, 1)} pts 20% abajo, ${fmtS(100 * p.sm, 1)} pts 20% arriba) reacción ${p.react} · tasa ${fmt(100 * p.r, 0)}% · spread ${fmt(100 * p.spread, 0)}% · comisión ${fmt(100 * p.comm, 2)}%`,
     `Resultado ${x.fin ? "final" : "teórico actual"}: ${fmtS(reg.resultado)}` + (reg.sinAjustes != null ? ` · sin ajustes (posición inicial a vencimiento): ${fmtS(reg.sinAjustes)} · aporte de los ajustes: ${fmtS(reg.aporteAjustes)}` : ""),
-    `Comisiones ${fmt(x.comisiones, 0)} · spread pagado ${fmt(x.spreadPagado, 0)}`,
+    `Comisiones ${fmt(x.comisiones, 0)} · spread pagado ${fmt(x.spreadPagado, 0)}` + (p.capital > 0 ? ` · capital ${fmt(p.capital, 0)} (${pct(reg.resultado / p.capital)})` : " · sin límite de capital"),
     `Posición inicial: ${reg.posicionInicial.length ? reg.posicionInicial.map(q => `${fmtS(q.q)} ${inst(q.tipo, q.K)} a ${fmt(q.prom)}`).join(", ") : "(sin armar)"}`,
     "Operaciones (rueda · GGAL · operación · precio vs medio · delta antes→después · teórico antes→después):",
     ...x.trades.map(t => `  R${t.dia} · ${fmt(t.S)} · ${t.lado > 0 ? "compra" : "venta"} ${t.cant} ${inst(t.tipo, t.K)} · ${fmt(t.px)} vs ${fmt(t.mid)} · ${fmt(t.deltaAntes, 0)}→${fmt(t.deltaDespues, 0)} · ${fmtS(t.teoAntes)}→${fmtS(t.teoDespues)}`),
@@ -558,6 +595,7 @@ async function guardarEnCurso() {
   const doc = {
     ...registro(g, g.fin ? "terminada" : "en curso"), guardado: new Date().toISOString(),
     rueda: g.dia, ruedas: g.p.ruedas, S: r2(g.S), cash: Math.round(g.cash), griegas: foto(),
+    ...(conLimite() ? { capital: g.p.capital, garantia: Math.round(garantia()), disponible: Math.round(disponible()) } : {}),
     posicion: Object.values(g.pos).map(p => ({ tipo: p.tipo, K: p.K, q: p.q, prom: p.prom, mult: mult(p.tipo), ...(g.fin ? {} : q(p.tipo, p.K)) })),
     cadena: g.fin ? [] : g.bases.map(K => ({ K, iv: r2(100 * ivK(K, g.S)), call: q("C", K), put: q("P", K) })),
     ultimasOps: g.ops.slice(-8).map(o => `R${o.dia}: ${o.txt}`),
@@ -692,6 +730,9 @@ function renderStatus() {
     ["VI al dinero", pct(ivAtm(g.S)).replace("+", ""), `tasa ${fmt(100 * g.p.r, 0)}% · ${g.p.modo === "historico" ? "tramo real" : "camino aleatorio"}`],
     ["Resultado teórico", `<span class="${cls(res)}">${fmtS(res)}</span>`, "a precio teórico, en $"],
     ["Si cerrás todo ya", `<span class="${cls(liq)}">${fmtS(liq)}</span>`, `a precio de mercado · el spread cuesta ${fmt(res - liq, 0)}`],
+    ...(conLimite() ? [g.fin
+      ? ["Sobre el capital", `<span class="${cls(g.cash)}">${pct(g.cash / g.p.capital)}</span>`, `capital ${fmt(g.p.capital, 0)} → ${fmt(g.p.capital + g.cash, 0)}`]
+      : ["Disponible", `<span class="${disponible() < 0 ? "loss" : ""}">${fmt(disponible(), 0)}</span>`, `capital ${fmt(g.p.capital, 0)} · caja ${fmtS(g.cash)} · garantía ${fmt(garantia(), 0)}`]] : []),
   ].map(([k, v, s]) => `<div class="stat"><span class="k">${k}</span><span class="v">${v}</span><span class="s">${s}</span></div>`).join("");
   ["#b1", "#b5", "#bfin", "#bclose"].forEach(id => $(id).disabled = g.fin);
   $("#bundo").disabled = g.fin || !pilaDeshacer.length;
@@ -868,7 +909,7 @@ function renderFinal() {
   const fechas = g.hist ? `Camino real de GGAL entre el <b>${g.hist.desde}</b> y el <b>${g.hist.hasta}</b>.` : "Camino aleatorio.";
   const maxPnl = Math.max(...g.pnl), minPnl = Math.min(...g.pnl);
   box.innerHTML = `<div class="head"><h2>Resultado de la partida</h2><button class="primary" id="bnew2">Jugar otra</button></div>
-    <div class="big ${cls(g.cash)}">${fmtS(g.cash)}</div>
+    <div class="big ${cls(g.cash)}">${fmtS(g.cash)}${conLimite() ? ` <span style="font-size:0.5em">${pct(g.cash / g.p.capital)} del capital</span>` : ""}</div>
     ${g.sinAjustes != null ? `<p style="margin:0">Si no tocabas nada después de armar la posición inicial: <b class="num ${cls(g.sinAjustes)}">${fmtS(g.sinAjustes)}</b>. Tus ajustes aportaron <b class="num ${cls(g.cash - g.sinAjustes)}">${fmtS(g.cash - g.sinAjustes)}</b>.</p>` : ""}
     <p class="note">${fechas} GGAL fue de ${fmt(g.p.S0)} a ${fmt(g.S)} (${pct(g.S / g.p.S0 - 1)}). Operaciones: ${g.ops.length - 1}. Pagaste ${fmt(g.comisiones, 0)} de comisiones y ${fmt(g.spreadPagado, 0)} de spread. En el camino, el resultado teórico llegó a ${fmtS(maxPnl)} en el mejor momento y a ${fmtS(minPnl)} en el peor.</p>`;
   $("#bnew2").onclick = () => nueva(leerCfg());
@@ -877,13 +918,13 @@ function renderFinal() {
 function render() { renderStatus(); renderChain(); renderChart(); renderCoach(); renderPos(); renderSpark(); renderLog(); renderFinal(); }
 
 // ---------- Configuración y guardado ----------
-const CFG = { S0: "#cS0", ruedas: "#cRuedas", r: "#cR", iv0: "#cIV", sk: "#cSkew", sm: "#cSmile", react: "#cReact", spread: "#cSpread", comm: "#cComm", rv: "#cRV" };
-function escribirCfg(p) { for (const [k, s] of Object.entries(CFG)) $(s).value = p[k]; $("#cModo").value = p.modo; $("#cEj").checked = p.ej; }
+const CFG = { capital: "#cCap", S0: "#cS0", ruedas: "#cRuedas", r: "#cR", iv0: "#cIV", sk: "#cSkew", sm: "#cSmile", react: "#cReact", spread: "#cSpread", comm: "#cComm", rv: "#cRV" };
+function escribirCfg(p) { for (const [k, s] of Object.entries(CFG)) $(s).value = p[k] ?? DEF[k]; $("#cModo").value = p.modo; $("#cEj").checked = p.ej; }
 function leerCfg() {
   const p = { ...DEF };
   for (const [k, s] of Object.entries(CFG)) { const v = parseFloat($(s).value); if (Number.isFinite(v)) p[k] = v; }
   p.ruedas = clamp(Math.round(p.ruedas), 5, 120); p.S0 = Math.max(p.S0, 1); p.iv0 = clamp(p.iv0, 0.05, 2.5); p.rv = clamp(p.rv, 0.01, 3);
-  p.spread = clamp(p.spread, 0, 1); p.comm = clamp(p.comm, 0, 0.05);
+  p.spread = clamp(p.spread, 0, 1); p.comm = clamp(p.comm, 0, 0.05); p.capital = Math.max(0, Math.round(p.capital));
   p.modo = $("#cModo").value; p.ej = $("#cEj").checked;
   return p;
 }

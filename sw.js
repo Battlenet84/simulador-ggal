@@ -1,4 +1,4 @@
-const CACHE = "simulador-ggal-3b90b406d8";
+const CACHE = "simulador-ggal-597bee7bc1";
 const ARCHIVOS = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-512.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(ARCHIVOS)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => {
