@@ -221,13 +221,15 @@ details > summary { cursor: pointer; font-weight: 600; }
       <label style="display:flex;align-items:center;gap:6px" id="lAhorro"><input type="checkbox" id="cAhorro"> Ahorro de datos (guardar acá, subir con Wi-Fi)</label>
       <span class="muted" id="syncInfo"></span>
       <button id="bsync" hidden>Subir ahora</button>
-      <a id="bexpCopy" class="btnlink" hidden href="https://claude.ai/artifact/1ynjKX7CccSvQN8eDRQgrs" target="_blank" rel="noopener">Copiar y abrir Claude</a>
+      <button id="bexpCopy" hidden>Copiar partidas</button>
+      <a id="babrirClaude" class="btnlink" hidden href="https://claude.ai/artifact/1ynjKX7CccSvQN8eDRQgrs" target="_blank" rel="noopener">Abrir Claude</a>
       <button id="bexpFile" hidden>Guardar archivo</button>
     </div>
+    <textarea id="expTexto" hidden readonly rows="4" aria-label="Partidas para copiar" style="width:100%;font-family:var(--f-num);font-size:0.8rem;margin-bottom:10px"></textarea>
     <details id="impBox" hidden style="margin-bottom:10px">
       <summary>Importar partidas del celular</summary>
       <div style="display:grid;gap:8px;margin-top:8px">
-        <p class="note">En la app del celular tocá "Copiar y abrir Claude" y pegá acá, o elegí el archivo que guardaste con "Guardar archivo". Las partidas repetidas no se duplican.</p>
+        <p class="note">En la app del celular tocá "Copiar partidas" y pegá acá, o elegí el archivo que guardaste con "Guardar archivo". Las partidas repetidas no se duplican.</p>
         <textarea id="impTexto" rows="4" aria-label="Partidas copiadas del celular" style="width:100%;font-family:var(--f-num);font-size:0.8rem"></textarea>
         <div class="controls"><button class="primary" id="bimp">Subir partidas pegadas</button><label class="muted">o archivo <input type="file" id="impFile" accept=".json,application/json,text/plain"></label></div>
       </div>
@@ -587,6 +589,7 @@ function renderSync() {
     $("#syncInfo").textContent = !pendientes.length ? "Las partidas quedan en este celular hasta que las sincronices." :
       nuevas ? `${nuevas} ${nuevas === 1 ? "partida" : "partidas"} sin sincronizar` : "Todo sincronizado (podés volver a exportarlas)";
     $("#bsync").hidden = true; $("#bexpCopy").hidden = $("#bexpFile").hidden = !pendientes.length;
+    if (!pendientes.length) $("#babrirClaude").hidden = $("#expTexto").hidden = true;
     return;
   }
   const n = pendientes.length;
@@ -609,13 +612,21 @@ function marcarExportadas(regs) {
   escribirLS(CLAVE_COLA, pendientes); renderSync();
 }
 const jsonExport = regs => JSON.stringify({ tipo: TIPO_EXPORT, v: 1, exportado: new Date().toISOString(), partidas: regs });
-function exportarCopia(e) {
-  // El link abre claude.ai; la copia arranca dentro del toque para que iOS la permita
+async function exportarCopia() {
+  // Copiar y abrir van en toques separados: si el mismo toque navega, iOS descarta la copia
   const regs = aExportar();
-  if (!regs.length) { e.preventDefault(); return; }
-  navigator.clipboard.writeText(jsonExport(regs))
-    .then(() => { marcarExportadas(regs); aviso(`${regs.length} ${regs.length === 1 ? "partida copiada" : "partidas copiadas"}: pegalas en "Importar partidas del celular".`); })
-    .catch(() => aviso("No se pudo copiar. Probá con Guardar archivo."));
+  if (!regs.length) return;
+  const t = jsonExport(regs), area = $("#expTexto");
+  try {
+    await navigator.clipboard.writeText(t);
+    area.hidden = true;
+    marcarExportadas(regs);
+    aviso(`${regs.length} ${regs.length === 1 ? "partida copiada" : "partidas copiadas"}. Tocá Abrir Claude y pegalas en "Importar partidas del celular".`);
+  } catch (e) {
+    area.hidden = false; area.value = t; area.focus(); area.select();
+    aviso("No pude copiar solo: mantené apretado el texto seleccionado y elegí Copiar.");
+  }
+  $("#babrirClaude").hidden = false;
 }
 async function exportarArchivo() {
   const regs = aExportar();
@@ -626,13 +637,15 @@ async function exportarArchivo() {
     if (navigator.canShare?.({ files: [archivo] })) await navigator.share({ files: [archivo], title: "Partidas simulador GGAL" });
     else { const a = document.createElement("a"); a.href = URL.createObjectURL(archivo); a.download = nombre; a.click(); URL.revokeObjectURL(a.href); }
     marcarExportadas(regs); aviso(`Archivo ${nombre} listo. Guardalo en OneDrive, carpeta simulador_opciones/partidas_movil.`);
-  } catch (err) { if (err?.name !== "AbortError") aviso("No se pudo guardar el archivo. Probá con Copiar y abrir Claude."); }
+  } catch (err) { if (err?.name !== "AbortError") aviso("No se pudo guardar el archivo. Probá con Copiar partidas."); }
 }
 async function importar(texto) {
   if (!db) return;
   let regs;
   try {
-    const d = JSON.parse(texto.trim());
+    // Tolera texto de más alrededor del JSON (p. ej. si se pegó desde un mensaje)
+    const t = texto.trim(), ini = t.search(/[[{]/), fin = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
+    const d = JSON.parse(ini >= 0 && fin > ini ? t.slice(ini, fin + 1) : t);
     regs = (Array.isArray(d) ? d : d?.tipo === TIPO_EXPORT ? d.partidas : null)
       ?.filter(r => r && typeof r.id === "string" && typeof r.fin === "string" && r.params && Array.isArray(r.operaciones));
   } catch (e) { regs = null; }
